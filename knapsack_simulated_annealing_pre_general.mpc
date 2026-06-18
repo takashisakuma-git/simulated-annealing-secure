@@ -1,0 +1,235 @@
+# MP-SPDZ implementation of knapsack simulated annealing with secure utility calculation only
+# Generalized version - supports any number of agents
+# 一般化された既存研究版（部分秘匿化） - 任意のエージェント数に対応
+
+from Compiler.types import sint, regint, Array
+from Compiler.library import print_ln, for_range_opt
+import random
+
+# Problem parameters (public)
+ITEMS = 6
+AGENTS = 16  # エージェント数を自由に設定可能！
+WEIGHTS = [10, 12, 7, 9, 21, 16]
+CAPACITY = 65
+
+# Simulated Annealing parameters
+INITIAL_TEMP = 100
+COOLING_RATE = 95  # 95/100 = 0.95
+MIN_TEMP = 1
+MAX_ITERATIONS = 100  # 直接設定
+
+print_ln("Simulated Annealing with %s agents and %s iterations", AGENTS, MAX_ITERATIONS)
+
+def secure_calculate_total_utility(solution, agent_utilities_list):
+    """
+    Securely calculate the sum of utilities for all agents (generalized)
+    任意数のエージェントの効用を秘匿計算（効用計算のみ秘匿）
+    """
+    individual_utilities = []
+    total_utility = sint(0)
+    
+    # 動的にエージェント数分の効用計算（秘匿）
+    for agent_idx in range(len(agent_utilities_list)):
+        agent_utility = sint(0)
+        for i in range(ITEMS):
+            agent_utility += agent_utilities_list[agent_idx][i] * solution[i]
+        individual_utilities.append(agent_utility)
+        total_utility += agent_utility
+    
+    return total_utility, individual_utilities
+
+def acceptance_decision(current_utility, new_utility, temperature):
+    """
+    Non-secure acceptance decision for simulated annealing（部分秘匿版SAの受容判定）
+    """
+    improvement = new_utility - current_utility # 効用差の計算
+    
+    # Check if improvement (using MP-SPDZ conditional)
+    is_improvement = improvement >= 0 # 効用差の計算
+    
+    # Generate random number for probabilistic acceptance
+    random_val = regint(0)
+    for i in range(10):  # 10-bit random number
+        bit = sint.get_random_bit().reveal()  # Reveal random bit immediately（秘匿ビット→平文ビット）
+        random_val += bit * (2 ** i) # 平文整数として蓄積、乱数生成後にすぐに平文化
+    
+    # Simple linear acceptance probability（受容確率の計算）
+    acceptance_threshold = temperature * 8  # Scale factor
+    
+    # Accept if random value is less than threshold（これも受容確率の計算）
+    probabilistic_accept = random_val < acceptance_threshold
+    
+    # Final decision: accept if improvement OR probabilistic acceptance（最終判定）
+    should_accept = is_improvement.if_else(regint(1), probabilistic_accept)
+    
+    return should_accept
+
+def simulated_annealing():
+    """
+    Simulated annealing algorithm with secure utility calculation only（効用計算のみ秘匿化）
+    Generalized for any number of agents
+    """
+    print_ln("Starting Simulated Annealing for Knapsack Problem")
+    print_ln("Items: %s, Agents: %s, Capacity: %s", ITEMS, AGENTS, CAPACITY)
+    print_ln("Max iterations: %s", MAX_ITERATIONS)
+    print_ln("Initial temperature: %s, Cooling rate: %s/100", INITIAL_TEMP, COOLING_RATE)
+    
+    # Input secret utilities from each agent（秘匿入力の準備）
+    print_ln("Reading secret utilities from %s agents...", AGENTS)
+    
+    # 動的にエージェント数分の効用値を読み込み
+    agent_utilities_list = []
+    for agent_idx in range(AGENTS):
+        agent_utilities = Array(ITEMS, sint)
+        for i in range(ITEMS):
+            agent_utilities[i] = sint.get_input_from(agent_idx + 1)  # Player 1, 2, 3, ...
+        agent_utilities_list.append(agent_utilities)
+        print_ln("Loaded utilities for Agent %s", agent_idx + 1)
+    
+    # Initial solution (from Mediator - Player 0, or use default)（初期解の設定（平文））
+    print_ln("Reading initial solution...")
+    initial_solution = []
+    for i in range(ITEMS):
+        try:
+            initial_solution.append(regint.get_input_from(0))
+        except:
+            # Default initial solution if no input
+            initial_solution.append(0)
+    
+    # 初期解の可視化
+    print_ln("Initial solution: %s %s %s %s %s %s", 
+             initial_solution[0], initial_solution[1], initial_solution[2],
+             initial_solution[3], initial_solution[4], initial_solution[5])
+    
+    # Convert to secure shares for utility calculation（平文解を秘匿shares化）
+    current_solution_secure = Array(ITEMS, sint)
+    for i in range(ITEMS):
+        current_solution_secure[i] = sint(initial_solution[i]) # 平文→秘匿変換
+    
+    # Calculate initial utility（初期効用の計算（秘匿計算））
+    current_total_utility, current_individual_utilities = secure_calculate_total_utility(
+        current_solution_secure, agent_utilities_list)
+    
+    current_total_revealed = current_total_utility.reveal() # すぐに開示
+    print_ln("Initial total utility: %s", current_total_revealed)
+    
+    # Current solution tracking（平文での解の追跡用配列）
+    current_solution = Array(ITEMS, regint)
+    for i in range(ITEMS):
+        current_solution[i] = regint(initial_solution[i])
+    
+    # Initialize temperature（平文温度管理）
+    current_temp = regint(INITIAL_TEMP)
+    
+    # Simulated annealing loop using @for_range_opt
+    @for_range_opt(MAX_ITERATIONS)
+    def _(iteration):
+        print_ln("=== Iteration %s ===", iteration)
+        print_ln("Current temperature: %s", current_temp)
+        
+        # Debug: Show current solution at start of iteration
+        print_ln("Current solution at start: %s %s %s %s %s %s",
+                 current_solution[0], current_solution[1], current_solution[2],
+                 current_solution[3], current_solution[4], current_solution[5])
+        
+        # Generate new solution using secure random bit generation（新しい解の初期化）
+        new_solution = Array(ITEMS, regint)
+        for i in range(ITEMS):
+            new_solution[i] = current_solution[i]
+        
+        # Use MP-SPDZ secure random bit generation（秘匿ランダムビット生成）
+        random_bits = []
+        for i in range(3):  # Generate 3 random bits for index selection
+            random_bits.append(sint.get_random_bit())
+        
+        # Convert secure random bits to index (0-5)
+        random_index_secure = random_bits[0] + random_bits[1] * 2 + random_bits[2] * 4
+        random_index = random_index_secure.reveal() % ITEMS # その場で計算
+        
+        new_solution[random_index] = 1 - new_solution[random_index]
+        
+        # Check weight constraint（重み制約のチェックを平文で実行）
+        total_weight = regint(0) # 平文での重み計算
+        for i in range(ITEMS):
+            total_weight = total_weight + WEIGHTS[i] * new_solution[i]
+        
+        # If weight exceeds capacity, revert the change（制約の判定）
+        weight_valid = total_weight <= CAPACITY # 平文での比較
+        
+        # Revert if invalid（制約違反時の解の復元）
+        for i in range(ITEMS):
+            new_solution[i] = weight_valid.if_else(new_solution[i], current_solution[i])
+        
+        print_ln("Generated new solution: %s %s %s %s %s %s",
+                 new_solution[0], new_solution[1], new_solution[2],
+                 new_solution[3], new_solution[4], new_solution[5])
+        
+        # Convert new solution to secure shares（平文解の秘匿化）
+        new_solution_secure = Array(ITEMS, sint)
+        for i in range(ITEMS):
+            new_solution_secure[i] = sint(new_solution[i])
+        
+        # Calculate new utility (secure)（新しい解の効用計算（秘匿））
+        new_total_utility, new_individual_utilities = secure_calculate_total_utility(
+            new_solution_secure, agent_utilities_list)
+        
+        # Reveal utilities for comparison（効用値の開示）
+        new_total_revealed = new_total_utility.reveal()
+        
+        print_ln("Current total utility: %s", current_total_revealed)
+        print_ln("New total utility: %s", new_total_revealed)
+        
+        # Calculate improvement（改善度の計算）
+        improvement = new_total_revealed - current_total_revealed
+        print_ln("Improvement: %s", improvement)
+        
+        # Simulated annealing acceptance decision
+        should_accept = acceptance_decision(current_total_revealed, new_total_revealed, current_temp)
+        
+        # Conditional update（条件付き解の更新）
+        print_ln("Before update - current_solution: %s %s %s %s %s %s",
+                 current_solution[0], current_solution[1], current_solution[2],
+                 current_solution[3], current_solution[4], current_solution[5])
+        
+        for i in range(ITEMS):
+            current_solution[i] = should_accept.if_else(new_solution[i], current_solution[i])
+        
+        current_total_revealed.update(should_accept.if_else(new_total_revealed, current_total_revealed))
+        
+        print_ln("After update - current_solution: %s %s %s %s %s %s",
+                 current_solution[0], current_solution[1], current_solution[2],
+                 current_solution[3], current_solution[4], current_solution[5])
+        
+        # Update temperature (cooling) - Use integer arithmetic only
+        # new_temp = current_temp * 95 / 100 (avoid floating point division)
+        new_temp_scaled = current_temp * COOLING_RATE  # 95 * current_temp
+        new_temp = new_temp_scaled // 100  # Integer division to avoid cfix
+        temp_is_valid = new_temp >= MIN_TEMP
+        final_temp = temp_is_valid.if_else(new_temp, regint(MIN_TEMP))
+        current_temp.update(final_temp)
+        
+        # Print status（状態の表示）
+        print_ln("Solution accepted: %s", should_accept.reveal())
+        print_ln("Weight constraint satisfied: %s", weight_valid.reveal())
+    
+    # Final results（アルゴリズムの終了）
+    print_ln("Simulated Annealing completed!")
+    print_ln("Final solution: %s %s %s %s %s %s",
+             current_solution[0], current_solution[1], current_solution[2],
+             current_solution[3], current_solution[4], current_solution[5])
+    
+    # Calculate final utilities for display（最終効用の計算と表示）
+    final_solution_secure = Array(ITEMS, sint)
+    for i in range(ITEMS):
+        final_solution_secure[i] = sint(current_solution[i])
+    
+    final_total_utility, final_individual_utilities = secure_calculate_total_utility(
+        final_solution_secure, agent_utilities_list)
+    
+    print_ln("Final utilities (revealed):")
+    for agent_idx in range(AGENTS):
+        print_ln("Agent %s utility: %s", agent_idx + 1, final_individual_utilities[agent_idx].reveal())
+    print_ln("Final total utility: %s", current_total_revealed)
+
+# Main execution
+simulated_annealing()
