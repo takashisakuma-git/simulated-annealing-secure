@@ -32,7 +32,7 @@ All experiments were conducted on the following environment:
 - **Memory**: 18 GB unified memory
 - **Storage**: 512 GB SSD
 - **OS**: macOS
-- **MPC Framework**: [MP-SPDZ](https://github.com/data61/MP-SPDZ)
+- **MPC Framework**: [MP-SPDZ](https://github.com/data61/MP-SPDZ) v0.4.1
 - **Protocol**: MASCOT, Semi, Shamir
 
 ## Usage
